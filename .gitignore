@@ -1,0 +1,56 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Angular
+apps/web/dist/
+apps/web/.angular/
+apps/web/tmp/
+apps/web/out-tsc/
+apps/web/coverage/
+apps/web/.env.local
+
+# .NET
+apps/api/**/bin/
+apps/api/**/obj/
+apps/api/**/out/
+apps/api/**/local.settings.json
+apps/api/**/*.user
+apps/api/**/.vs/
+
+# Azure Functions
+apps/api/**/.azure/
+apps/api/**/bin/
+apps/api/**/obj/
+
+# ML model artifacts (downloaded at build / runtime)
+apps/web/public/models/*.onnx
+apps/web/public/models/*.bin
+
+# Build / test artifacts
+*.log
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.local
+.env.*.local
