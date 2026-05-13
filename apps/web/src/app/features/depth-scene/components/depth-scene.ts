@@ -125,6 +125,8 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   }
 
   private initScene(colorTexture: THREE.Texture): void {
+    cancelAnimationFrame(this.animFrame);
+    this.scene?.dispose();
     this.scene = buildDepthScene(this.canvasRef.nativeElement, colorTexture);
     this.animate();
   }
