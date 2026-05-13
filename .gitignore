@@ -57,6 +57,6 @@ coverage/
 .env
 .env.local
 .env.*.local
-node_modules/
-package-lock.json
-package.json
+# Playwright installed temporarily at repo root for browser automation
+/package.json
+/package-lock.json
