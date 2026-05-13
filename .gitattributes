@@ -1,0 +1,58 @@
+# Auto-detect text files and normalise line endings to LF in the repo.
+# Working tree gets the platform's native line endings on checkout.
+* text=auto
+
+# Source code — always LF in the working tree, even on Windows.
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.css       text eol=lf
+*.scss      text eol=lf
+*.html      text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.glsl      text eol=lf
+*.vert      text eol=lf
+*.frag      text eol=lf
+
+# .NET / C# — also LF, csproj uses LF in .NET 8 templates anyway.
+*.cs        text eol=lf
+*.csproj    text eol=lf
+*.sln       text eol=lf merge=binary
+
+# Shell scripts MUST be LF or bash refuses to execute them on Unix.
+*.sh        text eol=lf
+
+# Windows-native scripts — keep CRLF.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binaries: never diff, never line-end-convert.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.webp      binary
+*.gif       binary
+*.ico       binary
+*.svg       text eol=lf
+*.onnx      binary
+*.bin       binary
+*.pdf       binary
+*.ttf       binary
+*.otf       binary
+*.woff      binary
+*.woff2     binary
+*.lock      binary -diff
+
+# Hide vendored skills from GitHub language statistics — they are not Adrián's code.
+.claude/skills/ui-ux-pro-max/**     linguist-vendored
+.claude/skills/emil-design-eng/**   linguist-vendored
+
+# Linguist also ignores generated CSV data inside skills.
+.claude/skills/**/*.csv             linguist-generated
