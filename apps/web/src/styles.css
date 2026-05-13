@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@source "./app/**/*.ts";
+
+@theme {
+  --color-oxblood: #A8324A;
+  --color-oxblood-hover: #8a2a3e;
+  --color-page: #FAFAFA;
+}
+
+html,
+body {
+  background-color: var(--color-page);
+}
