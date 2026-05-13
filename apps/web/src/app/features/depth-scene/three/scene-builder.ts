@@ -9,6 +9,7 @@ export interface DepthSceneObjects {
   depthTexture: THREE.DataTexture;
   hotspots: Hotspot[];
   hitTest(pointer: THREE.Vector2): string | null;
+  setShowDepth(value: number): void;
   dispose(): void;
 }
 
@@ -38,6 +39,10 @@ export function buildDepthScene(
     return hitTestHotspots(hotspots, pointer, camera);
   }
 
+  function setShowDepth(value: number): void {
+    (material.uniforms['uShowDepth'] as THREE.IUniform<number>).value = value;
+  }
+
   function dispose() {
     disposeHotspots(hotspots);
     renderer.dispose();
@@ -47,7 +52,7 @@ export function buildDepthScene(
     colorTexture.dispose();
   }
 
-  return { renderer, scene, camera, depthTexture, hotspots, hitTest, dispose };
+  return { renderer, scene, camera, depthTexture, hotspots, hitTest, setShowDepth, dispose };
 }
 
 export function updateParallax(

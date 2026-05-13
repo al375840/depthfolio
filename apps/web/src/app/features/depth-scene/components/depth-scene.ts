@@ -33,6 +33,27 @@ const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
 
       <canvas #canvas class="w-full h-full block"></canvas>
 
+      <!-- nearest-point indicator -->
+      @if (nearest(); as pt) {
+        <div class="absolute pointer-events-none"
+             [style.left.%]="pt.x"
+             [style.top.%]="pt.y"
+             style="transform: translate(-50%, -50%)">
+          <div class="w-6 h-6 rounded-full border-2 border-red-400 bg-red-400/20 animate-ping absolute inset-0"></div>
+          <div class="w-6 h-6 rounded-full border-2 border-red-400 bg-red-400/30"></div>
+        </div>
+      }
+
+      <!-- depth/color toggle -->
+      @if (status() === 'live' || isFallback()) {
+        <button
+          class="absolute top-2 left-2 text-[10px] text-white/60 bg-black/40 hover:bg-black/70 px-2 py-0.5 rounded transition-colors select-none"
+          (click)="toggleDepthView(); $event.stopPropagation()">
+          {{ showDepth() ? 'color' : 'depth' }}
+        </button>
+      }
+
+      <!-- status badge -->
       @if (isFallback()) {
         <span class="absolute top-2 right-2 text-[10px] text-white/40 bg-black/30 px-2 py-0.5 rounded select-none">
           static demo
@@ -78,8 +99,10 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   private readonly modelUrl = inject(DEPTH_MODEL_URL);
   private readonly router = inject(Router);
 
-  protected readonly status = signal<CameraStatus>('idle');
-  protected readonly hovering = signal(false);
+  protected readonly status    = signal<CameraStatus>('idle');
+  protected readonly hovering  = signal(false);
+  protected readonly showDepth = signal(false);
+  protected readonly nearest   = signal<{ x: number; y: number } | null>(null);
   protected readonly isFallback = computed(
     () => ['fallback', 'denied', 'busy'].includes(this.status()),
   );
@@ -124,6 +147,12 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     if (route) {
       this.router.navigate([route]);
     }
+  }
+
+  protected toggleDepthView(): void {
+    const next = !this.showDepth();
+    this.showDepth.set(next);
+    this.scene?.setShowDepth(next ? 1.0 : 0.0);
   }
 
   protected async retryCamera(): Promise<void> {
@@ -192,8 +221,10 @@ export class DepthScene implements AfterViewInit, OnDestroy {
       },
       onResult: (depth) => {
         if (!this.scene) return;
-        this.scene.depthTexture.image.data!.set(normalizeDepth(depth));
+        const normalized = normalizeDepth(depth);
+        this.scene.depthTexture.image.data!.set(normalized);
         this.scene.depthTexture.needsUpdate = true;
+        this.nearest.set(this.findNearestPoint(normalized));
         this.scheduleInference();
       },
       onError: () => this.switchToFallback(),
@@ -240,6 +271,19 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     const out = new Float32Array(256 * 256);
     for (let i = 0; i < out.length; i++) out[i] = data[i * 4] / 255;
     return out;
+  }
+
+  private findNearestPoint(depth: Float32Array): { x: number; y: number } {
+    const SIZE = 256;
+    let maxVal = 0;
+    let maxIdx = 0;
+    for (let i = 0; i < depth.length; i++) {
+      if (depth[i] > maxVal) { maxVal = depth[i]; maxIdx = i; }
+    }
+    const col = maxIdx % SIZE;
+    const row = Math.floor(maxIdx / SIZE);
+    // col/row are in image space (row 0 = top); convert to CSS % (x=left, y=top)
+    return { x: (col / SIZE) * 100, y: (row / SIZE) * 100 };
   }
 
   private switchToFallback(): void {

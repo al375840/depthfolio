@@ -8,11 +8,12 @@ export function createDisplacementMaterial(
 ): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
-      uColor: { value: colorTexture },
-      uDepth: { value: depthTexture },
-      uDisplacement: { value: displacementScale },
+      uColor:       { value: colorTexture },
+      uDepth:       { value: depthTexture },
+      uDisplacement:{ value: displacementScale },
+      uShowDepth:   { value: 0.0 },
     },
-    vertexShader: VERTEX_SHADER,
+    vertexShader:   VERTEX_SHADER,
     fragmentShader: FRAGMENT_SHADER,
   });
 }
