@@ -16,10 +16,10 @@ import { DepthModel } from '../ml/depth-model';
 import { preprocessFrame, normalizeDepth } from '../ml/preprocessing';
 import { buildDepthScene, updateParallax, type DepthSceneObjects } from '../three/scene-builder';
 
-type CameraStatus = 'idle' | 'live' | 'fallback' | 'denied';
+type CameraStatus = 'idle' | 'live' | 'fallback' | 'denied' | 'busy';
 
-const BENCHMARK_THRESHOLD_MS = 250;
-const TARGET_FPS = 30;
+const FALLBACK_THRESHOLD_MS = 8000; // only fallback if truly unusable
+const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
 
 @Component({
   selector: 'app-depth-scene',
@@ -38,6 +38,12 @@ const TARGET_FPS = 30;
           static demo
         </span>
       }
+      @if (status() === 'live') {
+        <span class="absolute top-2 right-2 text-[10px] text-white/40 bg-black/30 px-2 py-0.5 rounded select-none flex items-center gap-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-green-400 inline-block animate-pulse"></span>
+          live
+        </span>
+      }
 
       @if (status() === 'denied') {
         <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
@@ -45,6 +51,15 @@ const TARGET_FPS = 30;
             class="text-xs text-white bg-oxblood/80 hover:bg-oxblood px-4 py-1.5 rounded-full transition-colors"
             (click)="retryCamera(); $event.stopPropagation()">
             Activar cámara en vivo
+          </button>
+        </div>
+      }
+      @if (status() === 'busy') {
+        <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
+          <button
+            class="text-xs text-white/70 bg-black/40 hover:bg-black/60 px-4 py-1.5 rounded-full transition-colors"
+            (click)="retryCamera(); $event.stopPropagation()">
+            Cámara en uso — reintentar
           </button>
         </div>
       }
@@ -66,7 +81,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   protected readonly status = signal<CameraStatus>('idle');
   protected readonly hovering = signal(false);
   protected readonly isFallback = computed(
-    () => this.status() === 'fallback' || this.status() === 'denied',
+    () => ['fallback', 'denied', 'busy'].includes(this.status()),
   );
 
   private scene: DepthSceneObjects | undefined;
@@ -75,6 +90,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   private animFrame = 0;
   private mouseX = 0;
   private mouseY = 0;
+  private inferenceIntervalMs = MIN_INTERVAL_MS;
 
   async ngAfterViewInit(): Promise<void> {
     await this.startCamera();
@@ -120,16 +136,18 @@ export class DepthScene implements AfterViewInit, OnDestroy {
 
   private async startCamera(): Promise<void> {
     try {
+      console.log('[depth-scene] requesting camera...');
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      console.log('[depth-scene] camera granted, tracks:', stream.getVideoTracks().map(t => t.label));
       this.video = await this.startVideo(stream);
       this.initScene(this.createVideoTexture());
       this.loadModel();
     } catch (err) {
-      const isDenied =
-        err instanceof DOMException &&
-        (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
-      console.warn('[depth-scene] camera init failed:', err);
-      this.status.set(isDenied ? 'denied' : 'fallback');
+      const name = err instanceof DOMException ? err.name : '';
+      const isDenied = name === 'NotAllowedError' || name === 'PermissionDeniedError';
+      const isBusy   = name === 'NotReadableError' || name === 'TrackStartError';
+      console.warn('[depth-scene] camera init failed:', name, (err as Error).message);
+      this.status.set(isDenied ? 'denied' : isBusy ? 'busy' : 'fallback');
       await this.loadFallback();
     }
   }
@@ -155,11 +173,19 @@ export class DepthScene implements AfterViewInit, OnDestroy {
 
   private loadModel(): void {
     this.model = new DepthModel({
-      onReady: () => this.model!.benchmark(),
+      onReady: () => {
+        console.log('[depth-scene] model ready, running benchmark...');
+        this.model!.benchmark();
+      },
       onBenchmark: (ms) => {
-        if (ms > BENCHMARK_THRESHOLD_MS) {
+        console.log(`[depth-scene] benchmark: ${ms.toFixed(0)}ms → ~${(1000/ms).toFixed(1)}fps`);
+        if (ms > FALLBACK_THRESHOLD_MS) {
+          console.warn('[depth-scene] device too slow (>8s) → fallback');
           this.switchToFallback();
         } else {
+          // Run inference as fast as hardware allows, capped at 30fps
+          this.inferenceIntervalMs = Math.max(ms * 1.05, MIN_INTERVAL_MS);
+          console.log(`[depth-scene] live mode at ${(1000/this.inferenceIntervalMs).toFixed(1)}fps`);
           this.status.set('live');
           this.scheduleInference();
         }
@@ -180,7 +206,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     setTimeout(() => {
       const input = preprocessFrame(this.video!);
       this.model!.infer(input);
-    }, 1000 / TARGET_FPS);
+    }, this.inferenceIntervalMs);
   }
 
   private animate(): void {
