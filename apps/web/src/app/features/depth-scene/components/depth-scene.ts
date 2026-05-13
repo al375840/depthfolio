@@ -9,6 +9,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { Router } from '@angular/router';
 import * as THREE from 'three';
 import { DEPTH_MODEL_URL } from '../../../core/tokens/depth-model-url.token';
 import { DepthModel } from '../ml/depth-model';
@@ -25,11 +26,15 @@ const TARGET_FPS = 30;
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="relative w-full aspect-video bg-neutral-900" (mousemove)="onMouseMove($event)">
+    <div class="relative w-full aspect-video bg-neutral-900"
+         (mousemove)="onMouseMove($event)"
+         (click)="onClick($event)"
+         [style.cursor]="hovering() ? 'pointer' : 'default'">
+
       <canvas #canvas class="w-full h-full block"></canvas>
 
       @if (isFallback()) {
-        <span class="absolute top-2 left-2 text-xs text-white/70 bg-black/40 px-2 py-1 rounded">
+        <span class="absolute top-2 right-2 text-[10px] text-white/40 bg-black/30 px-2 py-0.5 rounded select-none">
           static demo
         </span>
       }
@@ -37,9 +42,8 @@ const TARGET_FPS = 30;
       @if (status() === 'denied') {
         <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
           <button
-            class="text-xs text-white bg-oxblood/80 hover:bg-oxblood px-3 py-1.5 rounded-full transition-colors"
-            (click)="retryCamera()"
-          >
+            class="text-xs text-white bg-oxblood/80 hover:bg-oxblood px-4 py-1.5 rounded-full transition-colors"
+            (click)="retryCamera(); $event.stopPropagation()">
             Activar cámara en vivo
           </button>
         </div>
@@ -47,7 +51,7 @@ const TARGET_FPS = 30;
 
       @if (status() === 'idle') {
         <div class="absolute inset-0 flex items-center justify-center">
-          <span class="text-sm text-white/60">Iniciando cámara…</span>
+          <span class="text-sm text-white/40">Iniciando…</span>
         </div>
       }
     </div>
@@ -57,8 +61,10 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   @ViewChild('canvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
   private readonly modelUrl = inject(DEPTH_MODEL_URL);
+  private readonly router = inject(Router);
 
   protected readonly status = signal<CameraStatus>('idle');
+  protected readonly hovering = signal(false);
   protected readonly isFallback = computed(
     () => this.status() === 'fallback' || this.status() === 'denied',
   );
@@ -69,10 +75,39 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   private animFrame = 0;
   private mouseX = 0;
   private mouseY = 0;
-  private lastFrameTime = 0;
 
   async ngAfterViewInit(): Promise<void> {
     await this.startCamera();
+  }
+
+  ngOnDestroy(): void {
+    cancelAnimationFrame(this.animFrame);
+    this.stopTracks();
+    this.model?.dispose();
+    this.scene?.dispose();
+  }
+
+  protected onMouseMove(e: MouseEvent): void {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this.mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouseY = ((e.clientY - rect.top) / rect.height) * 2 - 1;
+
+    if (this.scene) {
+      const pointer = new THREE.Vector2(this.mouseX, -this.mouseY);
+      const hit = this.scene.hitTest(pointer);
+      this.hovering.set(hit !== null);
+    }
+  }
+
+  protected onClick(e: MouseEvent): void {
+    if (!this.scene) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    const route = this.scene.hitTest(new THREE.Vector2(x, y));
+    if (route) {
+      this.router.navigate([route]);
+    }
   }
 
   protected async retryCamera(): Promise<void> {
@@ -99,19 +134,6 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     }
   }
 
-  ngOnDestroy(): void {
-    cancelAnimationFrame(this.animFrame);
-    this.video?.srcObject && (this.video.srcObject as MediaStream).getTracks().forEach(t => t.stop());
-    this.model?.dispose();
-    this.scene?.dispose();
-  }
-
-  protected onMouseMove(e: MouseEvent): void {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    this.mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouseY = ((e.clientY - rect.top) / rect.height) * 2 - 1;
-  }
-
   private async startVideo(stream: MediaStream): Promise<HTMLVideoElement> {
     const video = document.createElement('video');
     video.srcObject = stream;
@@ -133,9 +155,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
 
   private loadModel(): void {
     this.model = new DepthModel({
-      onReady: () => {
-        this.model!.benchmark();
-      },
+      onReady: () => this.model!.benchmark(),
       onBenchmark: (ms) => {
         if (ms > BENCHMARK_THRESHOLD_MS) {
           this.switchToFallback();
@@ -198,7 +218,13 @@ export class DepthScene implements AfterViewInit, OnDestroy {
 
   private switchToFallback(): void {
     this.status.set('fallback');
-    this.video?.srcObject && (this.video.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    this.stopTracks();
     this.loadFallback();
+  }
+
+  private stopTracks(): void {
+    if (this.video?.srcObject) {
+      (this.video.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    }
   }
 }

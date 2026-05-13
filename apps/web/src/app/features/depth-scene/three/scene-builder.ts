@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 import { createDisplacementMaterial, createDepthDataTexture } from './displacement-material';
+import { createHotspots, disposeHotspots, hitTestHotspots, type Hotspot } from './hotspots';
 
 export interface DepthSceneObjects {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   depthTexture: THREE.DataTexture;
+  hotspots: Hotspot[];
+  hitTest(pointer: THREE.Vector2): string | null;
   dispose(): void;
 }
 
@@ -29,7 +32,14 @@ export function buildDepthScene(
   const material = createDisplacementMaterial(colorTexture, depthTexture);
   scene.add(new THREE.Mesh(geometry, material));
 
+  const hotspots = createHotspots(scene);
+
+  function hitTest(pointer: THREE.Vector2): string | null {
+    return hitTestHotspots(hotspots, pointer, camera);
+  }
+
   function dispose() {
+    disposeHotspots(hotspots);
     renderer.dispose();
     geometry.dispose();
     material.dispose();
@@ -37,7 +47,7 @@ export function buildDepthScene(
     colorTexture.dispose();
   }
 
-  return { renderer, scene, camera, depthTexture, dispose };
+  return { renderer, scene, camera, depthTexture, hotspots, hitTest, dispose };
 }
 
 export function updateParallax(
