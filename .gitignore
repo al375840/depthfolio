@@ -60,3 +60,7 @@ coverage/
 # Playwright installed temporarily at repo root for browser automation
 /package.json
 /package-lock.json
+
+# Throwaway debug artifacts (Playwright screenshots & ad-hoc scripts)
+/ss-*.png
+/test-*.mjs

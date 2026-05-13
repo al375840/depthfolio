@@ -14,21 +14,49 @@ import * as THREE from 'three';
 import { DEPTH_MODEL_URL } from '../../../core/tokens/depth-model-url.token';
 import { DepthModel } from '../ml/depth-model';
 import { HandDetector, type HandPoint } from '../ml/hand-detector';
-import { preprocessFrame, normalizeDepth } from '../ml/preprocessing';
-import { buildDepthScene, updateParallax, type DepthSceneObjects } from '../three/scene-builder';
+import {
+  preprocessFrame,
+  normalizeDepth,
+  extractDepthFromTexture,
+} from '../ml/preprocessing';
+import {
+  buildDepthScene,
+  updateParallax,
+  type DepthSceneObjects,
+} from '../three/scene-builder';
+import { DwellTracker } from '../interaction/dwell-tracker';
+import {
+  mouseEventToNdc,
+  handPointToNdc,
+  ndcToVector,
+  type PointerNdc,
+} from '../interaction/pointer-coords';
 
 type CameraStatus = 'idle' | 'live' | 'fallback' | 'denied' | 'busy';
 
-const FALLBACK_THRESHOLD_MS = 8000; // only fallback if truly unusable
-const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
-const DWELL_MS = 1500;              // ms to hold index finger over a hotspot
+// ─── tuning constants ────────────────────────────────────────────────────────
+
+/** Anything slower than this and the depth model is unusable — bail to the static image. */
+const FALLBACK_THRESHOLD_MS = 8000;
+
+/** Hard cap on inference rate so we don't peg the GPU on fast machines. */
+const MIN_INFERENCE_INTERVAL_MS = 1000 / 30;
+
+/** How long the index finger must hover a hotspot to count as a click. */
+const DWELL_DURATION_MS = 1500;
+
+/** Multiplier on benchmark time to leave the GPU room to breathe between frames. */
+const INFERENCE_PACING_FACTOR = 1.05;
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Component({
   selector: 'app-depth-scene',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block w-full h-full' },
   template: `
-    <div class="relative w-full aspect-video bg-neutral-900"
+    <div class="relative w-full h-full bg-neutral-900"
          (mousemove)="onMouseMove($event)"
          (click)="onClick($event)"
          [style.cursor]="hovering() ? 'pointer' : 'default'">
@@ -41,20 +69,16 @@ const DWELL_MS = 1500;              // ms to hold index finger over a hotspot
              [style.left.%]="pt.x * 100"
              [style.top.%]="pt.y * 100"
              style="transform: translate(-50%, -50%)">
-          <!-- dwell progress arc (SVG, fills clockwise) -->
           <svg width="48" height="48" viewBox="0 0 48 48"
                class="absolute" style="top:-8px;left:-8px">
-            <!-- track ring -->
             <circle cx="24" cy="24" r="19" fill="none"
                     stroke="white" stroke-width="2" opacity="0.2"/>
-            <!-- fill arc -->
             <circle cx="24" cy="24" r="19" fill="none"
                     stroke="white" stroke-width="2.5"
                     stroke-dasharray="119.38"
                     [style.stroke-dashoffset]="119.38 * (1 - dwellProgress())"
                     style="transform:rotate(-90deg);transform-origin:24px 24px;transition:stroke-dashoffset 50ms linear"/>
           </svg>
-          <!-- dot at fingertip -->
           <div class="w-4 h-4 rounded-full bg-white/80 border border-white/50"></div>
         </div>
       }
@@ -112,61 +136,60 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   @ViewChild('canvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
   private readonly modelUrl = inject(DEPTH_MODEL_URL);
-  private readonly router = inject(Router);
+  private readonly router   = inject(Router);
 
-  protected readonly status       = signal<CameraStatus>('idle');
-  protected readonly hovering     = signal(false);
-  protected readonly showDepth    = signal(false);
-  protected readonly handPoint    = signal<HandPoint | null>(null);
-  protected readonly dwellProgress = signal(0); // 0–1 fill of the progress ring
-  protected readonly isFallback   = computed(
+  // ─── UI state (read by the template) ──────────────────────────────────────
+  protected readonly status        = signal<CameraStatus>('idle');
+  protected readonly hovering      = signal(false);
+  protected readonly showDepth     = signal(false);
+  protected readonly handPoint     = signal<HandPoint | null>(null);
+  protected readonly dwellProgress = signal(0);
+  protected readonly isFallback    = computed(
     () => ['fallback', 'denied', 'busy'].includes(this.status()),
   );
 
-  private scene: DepthSceneObjects | undefined;
-  private model: DepthModel | undefined;
-  private handDetector: HandDetector | undefined;
-  private video: HTMLVideoElement | undefined;
-  private animFrame = 0;
-  private mouseX = 0;
-  private mouseY = 0;
-  private inferenceIntervalMs = MIN_INTERVAL_MS;
-  private dwellRoute: string | null = null;
-  private dwellStartMs = 0;
+  // ─── runtime state ────────────────────────────────────────────────────────
+  private scene?: DepthSceneObjects;
+  private depthModel?: DepthModel;
+  private handDetector?: HandDetector;
+  private video?: HTMLVideoElement;
+  private animationFrameId = 0;
 
+  /** Last known pointer position in NDC, used to drive parallax. */
+  private pointer: PointerNdc = { x: 0, y: 0 };
+
+  /** Computed at benchmark time; how often to run a depth-model inference. */
+  private inferenceIntervalMs = MIN_INFERENCE_INTERVAL_MS;
+
+  private readonly dwell = new DwellTracker(DWELL_DURATION_MS);
+
+  // ─── lifecycle ────────────────────────────────────────────────────────────
   async ngAfterViewInit(): Promise<void> {
     await this.startCamera();
   }
 
   ngOnDestroy(): void {
-    cancelAnimationFrame(this.animFrame);
-    this.stopTracks();
-    this.model?.dispose();
+    cancelAnimationFrame(this.animationFrameId);
+    this.stopCameraTracks();
+    this.depthModel?.dispose();
     this.handDetector?.dispose();
     this.scene?.dispose();
   }
 
+  // ─── mouse fallback (works alongside hand control) ────────────────────────
   protected onMouseMove(e: MouseEvent): void {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    this.mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouseY = ((e.clientY - rect.top) / rect.height) * 2 - 1;
-
+    this.pointer = mouseEventToNdc(e);
     if (this.scene) {
-      const pointer = new THREE.Vector2(this.mouseX, -this.mouseY);
-      const hit = this.scene.hitTest(pointer);
+      const hit = this.scene.hitTest(ndcToVector(this.pointer));
       this.hovering.set(hit !== null);
     }
   }
 
   protected onClick(e: MouseEvent): void {
     if (!this.scene) return;
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    const route = this.scene.hitTest(new THREE.Vector2(x, y));
-    if (route) {
-      this.router.navigate([route]);
-    }
+    const ndc = mouseEventToNdc(e);
+    const route = this.scene.hitTest(ndcToVector(ndc));
+    if (route) this.router.navigate([route]);
   }
 
   protected toggleDepthView(): void {
@@ -176,43 +199,35 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   }
 
   protected async retryCamera(): Promise<void> {
-    cancelAnimationFrame(this.animFrame);
+    cancelAnimationFrame(this.animationFrameId);
     this.scene?.dispose();
     this.scene = undefined;
     this.status.set('idle');
     await this.startCamera();
   }
 
+  // ─── camera & scene bootstrap ─────────────────────────────────────────────
   private async startCamera(): Promise<void> {
     try {
-      console.log('[depth-scene] requesting camera...');
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      console.log('[depth-scene] camera granted, tracks:', stream.getVideoTracks().map(t => t.label));
-      this.video = await this.startVideo(stream);
-      this.initScene(this.createVideoTexture());
-      this.loadModel();
+      this.video = await this.attachStreamToVideoElement(stream);
+      this.initScene(new THREE.VideoTexture(this.video));
+      this.loadDepthModel();
       this.loadHandDetector();
     } catch (err) {
-      const name = err instanceof DOMException ? err.name : '';
-      const isDenied = name === 'NotAllowedError' || name === 'PermissionDeniedError';
-      const isBusy   = name === 'NotReadableError' || name === 'TrackStartError';
-      console.warn('[depth-scene] camera init failed:', name, (err as Error).message);
-      this.status.set(isDenied ? 'denied' : isBusy ? 'busy' : 'fallback');
+      this.status.set(this.classifyCameraError(err));
       await this.loadFallback();
     }
   }
 
-  private loadHandDetector(): void {
-    this.handDetector = new HandDetector();
-    this.handDetector.load().then(() => {
-      console.log('[depth-scene] hand detector ready');
-    }).catch((err) => {
-      console.warn('[depth-scene] hand detector failed to load:', err);
-      this.handDetector = undefined;
-    });
+  private classifyCameraError(err: unknown): CameraStatus {
+    const name = err instanceof DOMException ? err.name : '';
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') return 'denied';
+    if (name === 'NotReadableError' || name === 'TrackStartError')      return 'busy';
+    return 'fallback';
   }
 
-  private async startVideo(stream: MediaStream): Promise<HTMLVideoElement> {
+  private async attachStreamToVideoElement(stream: MediaStream): Promise<HTMLVideoElement> {
     const video = document.createElement('video');
     video.srcObject = stream;
     video.playsInline = true;
@@ -220,105 +235,99 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     return video;
   }
 
-  private createVideoTexture(): THREE.VideoTexture {
-    return new THREE.VideoTexture(this.video!);
-  }
-
   private initScene(colorTexture: THREE.Texture): void {
-    cancelAnimationFrame(this.animFrame);
+    cancelAnimationFrame(this.animationFrameId);
     this.scene?.dispose();
     this.scene = buildDepthScene(this.canvasRef.nativeElement, colorTexture);
-    this.animate();
+    this.runAnimationLoop();
   }
 
-  private loadModel(): void {
-    this.model = new DepthModel({
-      onReady: () => {
-        console.log('[depth-scene] model ready, running benchmark...');
-        this.model!.benchmark();
-      },
-      onBenchmark: (ms) => {
-        console.log(`[depth-scene] benchmark: ${ms.toFixed(0)}ms → ~${(1000/ms).toFixed(1)}fps`);
-        if (ms > FALLBACK_THRESHOLD_MS) {
-          console.warn('[depth-scene] device too slow (>8s) → fallback');
-          this.switchToFallback();
-        } else {
-          // Run inference as fast as hardware allows, capped at 30fps
-          this.inferenceIntervalMs = Math.max(ms * 1.05, MIN_INTERVAL_MS);
-          console.log(`[depth-scene] live mode at ${(1000/this.inferenceIntervalMs).toFixed(1)}fps`);
-          this.status.set('live');
-          this.scheduleInference();
-        }
-      },
-      onResult: (depth) => {
-        if (!this.scene) return;
-        const normalized = normalizeDepth(depth);
-        this.scene.depthTexture.image.data!.set(normalized);
-        this.scene.depthTexture.needsUpdate = true;
-        this.scheduleInference();
-      },
-      onError: () => this.switchToFallback(),
+  // ─── depth model ──────────────────────────────────────────────────────────
+  private loadDepthModel(): void {
+    this.depthModel = new DepthModel({
+      onReady: () => this.depthModel!.benchmark(),
+      onBenchmark: (ms) => this.applyBenchmarkResult(ms),
+      onResult: (depth) => this.applyDepthResult(depth),
+      onError:  () => this.switchToFallback(),
     });
-    this.model.load(this.modelUrl);
+    this.depthModel.load(this.modelUrl);
   }
 
-  private scheduleInference(): void {
-    if (!this.video || !this.model) return;
+  private applyBenchmarkResult(ms: number): void {
+    if (ms > FALLBACK_THRESHOLD_MS) {
+      this.switchToFallback();
+      return;
+    }
+    // Pace inferences just slower than the GPU can produce them.
+    this.inferenceIntervalMs = Math.max(ms * INFERENCE_PACING_FACTOR, MIN_INFERENCE_INTERVAL_MS);
+    this.status.set('live');
+    this.scheduleNextInference();
+  }
+
+  private applyDepthResult(depth: Float32Array): void {
+    if (!this.scene) return;
+    const normalized = normalizeDepth(depth);
+    this.scene.depthTexture.image.data!.set(normalized);
+    this.scene.depthTexture.needsUpdate = true;
+    this.scheduleNextInference();
+  }
+
+  private scheduleNextInference(): void {
+    if (!this.video || !this.depthModel) return;
     setTimeout(() => {
-      const input = preprocessFrame(this.video!);
-      this.model!.infer(input);
+      this.depthModel!.infer(preprocessFrame(this.video!));
     }, this.inferenceIntervalMs);
   }
 
-  private animate(): void {
-    this.animFrame = requestAnimationFrame(() => this.animate());
-    if (!this.scene) return;
-    const { renderer, scene, camera } = this.scene;
+  // ─── hand tracking ────────────────────────────────────────────────────────
+  private loadHandDetector(): void {
+    this.handDetector = new HandDetector();
+    this.handDetector.load().catch(() => {
+      // Hand control is optional — if MediaPipe fails to load,
+      // the user can still navigate with the mouse.
+      this.handDetector = undefined;
+    });
+  }
 
-    if (this.video && this.handDetector) {
-      const pt = this.handDetector.detect(this.video);
-      this.handPoint.set(pt);
-      if (pt) {
-        // Drive parallax from index finger position (0-1 → -1..1)
-        this.mouseX = pt.x * 2 - 1;
-        this.mouseY = pt.y * 2 - 1;
-        this.updateDwell(pt);
-      } else {
-        this.resetDwell();
-      }
+  // ─── render loop ──────────────────────────────────────────────────────────
+  private runAnimationLoop(): void {
+    this.animationFrameId = requestAnimationFrame(() => this.runAnimationLoop());
+    if (!this.scene) return;
+
+    this.processHandFrame();
+
+    updateParallax(this.scene.camera, this.pointer.x, this.pointer.y);
+    this.scene.renderer.render(this.scene.scene, this.scene.camera);
+  }
+
+  /** Detect the hand, drive the pointer & cursor, and update the dwell timer. */
+  private processHandFrame(): void {
+    if (!this.video || !this.handDetector || !this.scene) return;
+
+    const pt = this.handDetector.detect(this.video);
+    this.handPoint.set(pt);
+
+    if (!pt) {
+      this.dwell.update(null);
+      this.dwellProgress.set(0);
+      return;
     }
 
-    updateParallax(camera, this.mouseX, this.mouseY);
-    renderer.render(scene, camera);
-  }
+    // Hand position takes over the pointer when visible.
+    this.pointer = handPointToNdc(pt);
 
-  private updateDwell(pt: HandPoint): void {
-    if (!this.scene) return;
-    const ndcX =  pt.x * 2 - 1;
-    const ndcY = -(pt.y * 2 - 1);
-    const route = this.scene.hitTest(new THREE.Vector2(ndcX, ndcY));
-    const now = performance.now();
-    if (route) {
-      if (route !== this.dwellRoute) {
-        this.dwellRoute = route;
-        this.dwellStartMs = now;
-      }
-      const progress = Math.min((now - this.dwellStartMs) / DWELL_MS, 1);
-      this.dwellProgress.set(progress);
-      if (progress >= 1) {
-        this.resetDwell();
-        this.router.navigate([route]);
-      }
-    } else {
-      this.resetDwell();
+    const route = this.scene.hitTest(ndcToVector(this.pointer));
+    this.dwell.update(route);
+    this.dwellProgress.set(this.dwell.progress);
+
+    if (this.dwell.justCompleted && route) {
+      this.dwell.reset();
+      this.dwellProgress.set(0);
+      this.router.navigate([route]);
     }
   }
 
-  private resetDwell(): void {
-    this.dwellRoute = null;
-    this.dwellProgress.set(0);
-  }
-
+  // ─── fallback (still image when camera or model isn't usable) ─────────────
   private async loadFallback(): Promise<void> {
     const loader = new THREE.TextureLoader();
     const [color, depth] = await Promise.all([
@@ -327,30 +336,18 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     ]);
     this.initScene(color);
     if (this.scene) {
-      const depthData = this.extractDepthFromTexture(depth);
-      this.scene.depthTexture.image.data!.set(depthData);
+      this.scene.depthTexture.image.data!.set(extractDepthFromTexture(depth));
       this.scene.depthTexture.needsUpdate = true;
     }
   }
 
-  private extractDepthFromTexture(texture: THREE.Texture): Float32Array {
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = 256;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(texture.image as HTMLImageElement, 0, 0, 256, 256);
-    const { data } = ctx.getImageData(0, 0, 256, 256);
-    const out = new Float32Array(256 * 256);
-    for (let i = 0; i < out.length; i++) out[i] = data[i * 4] / 255;
-    return out;
-  }
-
   private switchToFallback(): void {
     this.status.set('fallback');
-    this.stopTracks();
+    this.stopCameraTracks();
     this.loadFallback();
   }
 
-  private stopTracks(): void {
+  private stopCameraTracks(): void {
     if (this.video?.srcObject) {
       (this.video.srcObject as MediaStream).getTracks().forEach(t => t.stop());
     }

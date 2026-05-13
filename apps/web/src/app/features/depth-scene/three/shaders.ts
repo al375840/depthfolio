@@ -19,18 +19,11 @@ export const FRAGMENT_SHADER = /* glsl */ `
 
   varying vec2 vUv;
 
-  // Blue (far=0) → Green (mid) → Red (near=1)
-  vec3 heatmap(float t) {
-    float r = smoothstep(0.45, 1.0, t);
-    float g = 1.0 - abs(t - 0.5) * 2.2;
-    float b = smoothstep(0.45, 0.0, t);
-    return clamp(vec3(r, g, b), 0.0, 1.0);
-  }
-
   void main() {
     vec4 color = texture2D(uColor, vUv);
     float depth = texture2D(uDepth, vUv).r;
-    vec3 heat  = heatmap(depth);
-    gl_FragColor = vec4(mix(color.rgb, heat, uShowDepth), 1.0);
+    // near=white (1.0), far=black (0.0) — monochrome depth view
+    vec3 grey = vec3(depth);
+    gl_FragColor = vec4(mix(color.rgb, grey, uShowDepth), 1.0);
   }
 `;
