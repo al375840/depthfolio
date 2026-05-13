@@ -8,6 +8,9 @@ desktop.ini
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/
+
+# Claude Code local session state (permissions granted interactively)
+.claude/settings.local.json
 *.swp
 *.swo
 
