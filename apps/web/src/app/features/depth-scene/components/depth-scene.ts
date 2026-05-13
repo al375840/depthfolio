@@ -21,6 +21,7 @@ type CameraStatus = 'idle' | 'live' | 'fallback' | 'denied' | 'busy';
 
 const FALLBACK_THRESHOLD_MS = 8000; // only fallback if truly unusable
 const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
+const DWELL_MS = 1500;              // ms to hold index finger over a hotspot
 
 @Component({
   selector: 'app-depth-scene',
@@ -34,14 +35,27 @@ const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
 
       <canvas #canvas class="w-full h-full block"></canvas>
 
-      <!-- hand cursor indicator -->
+      <!-- index finger cursor + dwell progress ring -->
       @if (handPoint(); as pt) {
         <div class="absolute pointer-events-none"
              [style.left.%]="pt.x * 100"
              [style.top.%]="pt.y * 100"
              style="transform: translate(-50%, -50%)">
-          <div class="w-8 h-8 rounded-full border-2 border-white/70 bg-white/10 animate-ping absolute inset-0"></div>
-          <div class="w-8 h-8 rounded-full border-2 border-white/70 bg-white/10"></div>
+          <!-- dwell progress arc (SVG, fills clockwise) -->
+          <svg width="48" height="48" viewBox="0 0 48 48"
+               class="absolute" style="top:-8px;left:-8px">
+            <!-- track ring -->
+            <circle cx="24" cy="24" r="19" fill="none"
+                    stroke="white" stroke-width="2" opacity="0.2"/>
+            <!-- fill arc -->
+            <circle cx="24" cy="24" r="19" fill="none"
+                    stroke="white" stroke-width="2.5"
+                    stroke-dasharray="119.38"
+                    [style.stroke-dashoffset]="119.38 * (1 - dwellProgress())"
+                    style="transform:rotate(-90deg);transform-origin:24px 24px;transition:stroke-dashoffset 50ms linear"/>
+          </svg>
+          <!-- dot at fingertip -->
+          <div class="w-4 h-4 rounded-full bg-white/80 border border-white/50"></div>
         </div>
       }
 
@@ -100,11 +114,12 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   private readonly modelUrl = inject(DEPTH_MODEL_URL);
   private readonly router = inject(Router);
 
-  protected readonly status    = signal<CameraStatus>('idle');
-  protected readonly hovering  = signal(false);
-  protected readonly showDepth = signal(false);
-  protected readonly handPoint = signal<HandPoint | null>(null);
-  protected readonly isFallback = computed(
+  protected readonly status       = signal<CameraStatus>('idle');
+  protected readonly hovering     = signal(false);
+  protected readonly showDepth    = signal(false);
+  protected readonly handPoint    = signal<HandPoint | null>(null);
+  protected readonly dwellProgress = signal(0); // 0–1 fill of the progress ring
+  protected readonly isFallback   = computed(
     () => ['fallback', 'denied', 'busy'].includes(this.status()),
   );
 
@@ -116,6 +131,8 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   private mouseX = 0;
   private mouseY = 0;
   private inferenceIntervalMs = MIN_INTERVAL_MS;
+  private dwellRoute: string | null = null;
+  private dwellStartMs = 0;
 
   async ngAfterViewInit(): Promise<void> {
     await this.startCamera();
@@ -262,14 +279,44 @@ export class DepthScene implements AfterViewInit, OnDestroy {
       const pt = this.handDetector.detect(this.video);
       this.handPoint.set(pt);
       if (pt) {
-        // Drive parallax from hand position (0-1 → -1..1)
+        // Drive parallax from index finger position (0-1 → -1..1)
         this.mouseX = pt.x * 2 - 1;
         this.mouseY = pt.y * 2 - 1;
+        this.updateDwell(pt);
+      } else {
+        this.resetDwell();
       }
     }
 
     updateParallax(camera, this.mouseX, this.mouseY);
     renderer.render(scene, camera);
+  }
+
+  private updateDwell(pt: HandPoint): void {
+    if (!this.scene) return;
+    const ndcX =  pt.x * 2 - 1;
+    const ndcY = -(pt.y * 2 - 1);
+    const route = this.scene.hitTest(new THREE.Vector2(ndcX, ndcY));
+    const now = performance.now();
+    if (route) {
+      if (route !== this.dwellRoute) {
+        this.dwellRoute = route;
+        this.dwellStartMs = now;
+      }
+      const progress = Math.min((now - this.dwellStartMs) / DWELL_MS, 1);
+      this.dwellProgress.set(progress);
+      if (progress >= 1) {
+        this.resetDwell();
+        this.router.navigate([route]);
+      }
+    } else {
+      this.resetDwell();
+    }
+  }
+
+  private resetDwell(): void {
+    this.dwellRoute = null;
+    this.dwellProgress.set(0);
   }
 
   private async loadFallback(): Promise<void> {

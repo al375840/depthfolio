@@ -35,9 +35,9 @@ export class HandDetector {
     const result = this.landmarker.detectForVideo(video, now);
     if (!result.landmarks.length) return null;
 
-    // Landmark 0 = wrist — closest, most stable single point
-    const wrist = result.landmarks[0][0];
-    return { x: wrist.x, y: wrist.y };
+    // Landmark 8 = index finger tip
+    const tip = result.landmarks[0][8];
+    return { x: tip.x, y: tip.y };
   }
 
   dispose(): void {
