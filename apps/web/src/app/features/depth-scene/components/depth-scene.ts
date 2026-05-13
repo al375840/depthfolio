@@ -13,6 +13,7 @@ import { Router } from '@angular/router';
 import * as THREE from 'three';
 import { DEPTH_MODEL_URL } from '../../../core/tokens/depth-model-url.token';
 import { DepthModel } from '../ml/depth-model';
+import { HandDetector, type HandPoint } from '../ml/hand-detector';
 import { preprocessFrame, normalizeDepth } from '../ml/preprocessing';
 import { buildDepthScene, updateParallax, type DepthSceneObjects } from '../three/scene-builder';
 
@@ -33,14 +34,14 @@ const MIN_INTERVAL_MS = 1000 / 30;  // cap at 30fps max
 
       <canvas #canvas class="w-full h-full block"></canvas>
 
-      <!-- nearest-point indicator -->
-      @if (nearest(); as pt) {
+      <!-- hand cursor indicator -->
+      @if (handPoint(); as pt) {
         <div class="absolute pointer-events-none"
-             [style.left.%]="pt.x"
-             [style.top.%]="pt.y"
+             [style.left.%]="pt.x * 100"
+             [style.top.%]="pt.y * 100"
              style="transform: translate(-50%, -50%)">
-          <div class="w-6 h-6 rounded-full border-2 border-red-400 bg-red-400/20 animate-ping absolute inset-0"></div>
-          <div class="w-6 h-6 rounded-full border-2 border-red-400 bg-red-400/30"></div>
+          <div class="w-8 h-8 rounded-full border-2 border-white/70 bg-white/10 animate-ping absolute inset-0"></div>
+          <div class="w-8 h-8 rounded-full border-2 border-white/70 bg-white/10"></div>
         </div>
       }
 
@@ -102,13 +103,14 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   protected readonly status    = signal<CameraStatus>('idle');
   protected readonly hovering  = signal(false);
   protected readonly showDepth = signal(false);
-  protected readonly nearest   = signal<{ x: number; y: number } | null>(null);
+  protected readonly handPoint = signal<HandPoint | null>(null);
   protected readonly isFallback = computed(
     () => ['fallback', 'denied', 'busy'].includes(this.status()),
   );
 
   private scene: DepthSceneObjects | undefined;
   private model: DepthModel | undefined;
+  private handDetector: HandDetector | undefined;
   private video: HTMLVideoElement | undefined;
   private animFrame = 0;
   private mouseX = 0;
@@ -123,6 +125,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     cancelAnimationFrame(this.animFrame);
     this.stopTracks();
     this.model?.dispose();
+    this.handDetector?.dispose();
     this.scene?.dispose();
   }
 
@@ -171,6 +174,7 @@ export class DepthScene implements AfterViewInit, OnDestroy {
       this.video = await this.startVideo(stream);
       this.initScene(this.createVideoTexture());
       this.loadModel();
+      this.loadHandDetector();
     } catch (err) {
       const name = err instanceof DOMException ? err.name : '';
       const isDenied = name === 'NotAllowedError' || name === 'PermissionDeniedError';
@@ -179,6 +183,16 @@ export class DepthScene implements AfterViewInit, OnDestroy {
       this.status.set(isDenied ? 'denied' : isBusy ? 'busy' : 'fallback');
       await this.loadFallback();
     }
+  }
+
+  private loadHandDetector(): void {
+    this.handDetector = new HandDetector();
+    this.handDetector.load().then(() => {
+      console.log('[depth-scene] hand detector ready');
+    }).catch((err) => {
+      console.warn('[depth-scene] hand detector failed to load:', err);
+      this.handDetector = undefined;
+    });
   }
 
   private async startVideo(stream: MediaStream): Promise<HTMLVideoElement> {
@@ -224,7 +238,6 @@ export class DepthScene implements AfterViewInit, OnDestroy {
         const normalized = normalizeDepth(depth);
         this.scene.depthTexture.image.data!.set(normalized);
         this.scene.depthTexture.needsUpdate = true;
-        this.nearest.set(this.findNearestPoint(normalized));
         this.scheduleInference();
       },
       onError: () => this.switchToFallback(),
@@ -244,6 +257,17 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     this.animFrame = requestAnimationFrame(() => this.animate());
     if (!this.scene) return;
     const { renderer, scene, camera } = this.scene;
+
+    if (this.video && this.handDetector) {
+      const pt = this.handDetector.detect(this.video);
+      this.handPoint.set(pt);
+      if (pt) {
+        // Drive parallax from hand position (0-1 → -1..1)
+        this.mouseX = pt.x * 2 - 1;
+        this.mouseY = pt.y * 2 - 1;
+      }
+    }
+
     updateParallax(camera, this.mouseX, this.mouseY);
     renderer.render(scene, camera);
   }
@@ -271,19 +295,6 @@ export class DepthScene implements AfterViewInit, OnDestroy {
     const out = new Float32Array(256 * 256);
     for (let i = 0; i < out.length; i++) out[i] = data[i * 4] / 255;
     return out;
-  }
-
-  private findNearestPoint(depth: Float32Array): { x: number; y: number } {
-    const SIZE = 256;
-    let maxVal = 0;
-    let maxIdx = 0;
-    for (let i = 0; i < depth.length; i++) {
-      if (depth[i] > maxVal) { maxVal = depth[i]; maxIdx = i; }
-    }
-    const col = maxIdx % SIZE;
-    const row = Math.floor(maxIdx / SIZE);
-    // col/row are in image space (row 0 = top); convert to CSS % (x=left, y=top)
-    return { x: (col / SIZE) * 100, y: (row / SIZE) * 100 };
   }
 
   private switchToFallback(): void {
