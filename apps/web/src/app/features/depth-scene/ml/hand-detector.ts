@@ -35,9 +35,11 @@ export class HandDetector {
     const result = this.landmarker.detectForVideo(video, now);
     if (!result.landmarks.length) return null;
 
-    // Landmark 8 = index finger tip
+    // Landmark 8 = index finger tip.
+    // X is flipped because the canvas is rendered mirrored — moving your right
+    // hand right should also move the cursor right in the reflection.
     const tip = result.landmarks[0][8];
-    return { x: tip.x, y: tip.y };
+    return { x: 1 - tip.x, y: tip.y };
   }
 
   dispose(): void {

@@ -23,8 +23,10 @@ export function buildDepthScene(
   renderer.setSize(w, h);
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
+  // Camera pulled in close so the displaced subject fills the frame and the
+  // depth pop feels more present — "coming out of the page".
   const camera = new THREE.PerspectiveCamera(35, w / h, 0.1, 100);
-  camera.position.z = 4;
+  camera.position.z = 3.2;
 
   const scene = new THREE.Scene();
 

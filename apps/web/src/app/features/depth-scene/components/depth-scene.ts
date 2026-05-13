@@ -141,7 +141,8 @@ export class DepthScene implements AfterViewInit, OnDestroy {
   // ─── UI state (read by the template) ──────────────────────────────────────
   protected readonly status        = signal<CameraStatus>('idle');
   protected readonly hovering      = signal(false);
-  protected readonly showDepth     = signal(false);
+  // Start in depth mode — the colour feed is treated as a "show me the source" toggle.
+  protected readonly showDepth     = signal(true);
   protected readonly handPoint     = signal<HandPoint | null>(null);
   protected readonly dwellProgress = signal(0);
   protected readonly isFallback    = computed(
