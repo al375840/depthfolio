@@ -8,6 +8,9 @@ desktop.ini
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/
+
+# Claude Code local session state (permissions granted interactively)
+.claude/settings.local.json
 *.swp
 *.swo
 
@@ -40,9 +43,9 @@ apps/api/**/.azure/
 apps/api/**/bin/
 apps/api/**/obj/
 
-# ML model artifacts (downloaded at build / runtime)
-apps/web/public/models/*.onnx
-apps/web/public/models/*.bin
+# ML model artifacts — large binaries; tracked directly at current size (~17 MB).
+# If the model is updated frequently, consider moving to Git LFS.
+# apps/web/public/models/*.onnx
 
 # Build / test artifacts
 *.log
@@ -54,3 +57,10 @@ coverage/
 .env
 .env.local
 .env.*.local
+# Playwright installed temporarily at repo root for browser automation
+/package.json
+/package-lock.json
+
+# Throwaway debug artifacts (Playwright screenshots & ad-hoc scripts)
+/ss-*.png
+/test-*.mjs
